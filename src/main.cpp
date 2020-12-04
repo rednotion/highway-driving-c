@@ -139,7 +139,7 @@ int main() {
             if (obj_lane < 3) {
               lane_speeds[obj_lane] += obj_speed;
               lane_cars[obj_lane].push_back(i);
-              if ((fabs(obj_s - car_s) < 20) | (obj_s > car_s)) {
+              if ((obj_s - car_s > - 20) && (obj_s - car_s < 80)) {
                 lane_nearby_cars[obj_lane] += 1;
               }
             }
@@ -204,7 +204,7 @@ int main() {
           // 3 = plan a switch car is pretty ahead of u, slown down to lane change
           // 99 = just stay in this lane and track the car in front of you
 
-          if (consider_switch && in_lane_center) {
+          if (consider_switch && in_lane_center && not_prepping && (ref_velocity > 30)) {
             
             // STEP 1: Which lanes to consider, based on speed
             switch_lane = 1;

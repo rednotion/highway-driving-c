@@ -230,18 +230,22 @@ bool viablePath(vector<vector<double>> trajectory_vals,
     
     for (int i=0; i < next_x.size(); ++i) {
       obj_s += 0.02 * obj_speed;
-      vector<double> obj_xy = getXY(obj_s, obj_d, maps_s, maps_x, maps_y);
-      double vertical_dist = fabs(obj_xy[0] - next_x[i]);
-      double horizontal_dist = fabs(obj_xy[1] - next_y[i]);
-      double pythagoras = pow(vertical_dist*vertical_dist + horizontal_dist*horizontal_dist, 0.5);
-      // check if diagonal distance b/w our path & other car is less than 10m
-      if (pythagoras < 6) {
+      vector<double> next_sd  = getFrenet(next_x[i], next_y[i], angle, maps_x, maps_y);
+      // vector<double> obj_xy = getXY(obj_s, obj_d, maps_s, maps_x, maps_y);
+//       double vertical_dist = fabs(next_sd[0] - next_x[i]);
+//       //double horizontal_dist = fabs(obj_xy[1] - next_y[i]);
+//       //double pythagoras = pow(vertical_dist*vertical_dist + horizontal_dist*horizontal_dist, 0.5);
+//       // check if diagonal distance b/w our path & other car is less than 10m
+//       if (pythagoras < 10) {
+//         return false;
+//       }
+//       // if the other lane obj ends up being just 20m ahead of us, don't bother man
+//       // j != lane_obj_idxs.size() --> not the blocking car
+      
+      double s_dist = obj_s - next_sd[0];
+      if ((fabs(s_dist) < 10)) {
         return false;
       }
-      // if the other lane obj ends up being just 20m ahead of us, don't bother man
-      // j != lane_obj_idxs.size() --> not the blocking car
-      vector<double> next_sd  = getFrenet(next_x[i], next_y[i], angle, maps_x, maps_y);
-      double s_dist = obj_s - next_sd[0];
       if ((j != lane_obj_idxs.size()) && (s_dist > 0) && (s_dist < 20)) {
         std::cout<<"......car too close to switch"<<std::endl;
         return false;
@@ -302,7 +306,7 @@ vector<vector<double>> generateNextVals(double car_s, double pos_x, double pos_y
   //while (current_x < target_x) {
   while (n_added < 50 - previous_path_x.size()) {
     // fix velocity
-    double delta = (ref_velocity < 35) ? 0.16 : 0.224;
+    double delta = 0.224;
 
     // for keep in lane, immediate switch, test switches, speed up if possible
     if ((state == 0) | (state == 1) | (state == 2)) {
