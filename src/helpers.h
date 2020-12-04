@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string>
 #include <vector>
+#include "spline.h"
 
 // for convenience
 using std::string;
@@ -152,6 +153,188 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s,
   double y = seg_y + d*sin(perp_heading);
 
   return {x,y};
+}
+
+// Return car lane
+int getCarLane(double d) {
+  if (d <= 4) {
+    return 0;
+  } else if (d <= 8) {
+    return 1;
+  } else if (d <= 12) {
+    return 2;
+  } else {
+    return 99;
+  }
+}
+
+// get speed
+double getCarSpeed(vector<double> sensor_fusion) {
+  double obj_vx = sensor_fusion[3];
+  double obj_vy = sensor_fusion[4];
+  double obj_speed = sqrt(obj_vx*obj_vx + obj_vy*obj_vy);
+
+  return obj_speed;
+}
+
+// get space
+double spaceAroundCar(vector<vector<double>> sensor_fusion, vector<int> lane_cars, int track_car_idx, char direction) {
+  double space = 10000.0;
+  double track_car_s = sensor_fusion[track_car_idx][5];
+  if (direction == 'f') {
+    // space in front of this car
+    for (int i=0; i < lane_cars.size(); ++i) {
+      double s = sensor_fusion[lane_cars[i]][5];
+      double dist = s - track_car_s;
+      if ((s > track_car_s) && (dist < space)) {
+        space = dist;
+      }
+    }
+  } else {
+    // space behind this car
+    for (int i=0; i < lane_cars.size(); ++i) {
+      double s = sensor_fusion[lane_cars[i]][5];
+      double dist = track_car_s - s;
+      if ((track_car_s > s) && (dist < space)) {
+        space = dist;
+      }
+    }
+  }
+  return space;
+}
+
+// check viable path
+bool viablePath(vector<vector<double>> next_xy_vals,
+                int block_car_idx,
+                vector<int> lane_obj_idxs,
+                vector<vector<double>> sensor_fusion,
+                const vector<double> &maps_s, const vector<double> &maps_x,
+                const vector<double> &maps_y) {
+
+  vector<double> next_x = next_xy_vals[0];
+  vector<double> next_y = next_xy_vals[1];
+  
+  vector<int> objs_to_test = lane_obj_idxs;
+  objs_to_test.push_back(block_car_idx);
+  
+  for (int j=0; j < objs_to_test.size(); ++j) {
+    double obj_s = sensor_fusion[objs_to_test[j]][5];
+    double obj_d = sensor_fusion[objs_to_test[j]][6];
+    double obj_speed = getCarSpeed(sensor_fusion[objs_to_test[j]]);
+    
+    for (int i=0; i < next_x.size(); ++i) {
+      // check the adjacent car
+      obj_s += 0.02 * obj_speed;
+      vector<double> obj_xy = getXY(obj_s, obj_d, maps_s, maps_x, maps_y);
+      double vertical_dist = fabs(obj_xy[0] - next_x[i]);
+      double horizontal_dist = fabs(obj_xy[1] - next_y[i]);
+      double pythagoras = pow(vertical_dist*vertical_dist + horizontal_dist*horizontal_dist, 0.5);
+      if (pythagoras < 10) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// generate path
+vector<vector<double>> generateNextVals(double car_s, double pos_x, double pos_y, double angle,
+                                        double &ref_velocity, double lane_velocity,
+                                        bool is_lane_change, int target_lane, //vector<int> lane_points,
+                                        vector<double> target_s_points, 
+                                        vector<double> previous_path_x, vector<double> previous_path_y,
+                                        vector<double> spline_ref_x, vector<double> spline_ref_y,
+                                        bool speed_up, bool slow_down, bool follow,
+                                        const vector<double> &maps_s, const vector<double> &maps_x, 
+                                        const vector<double> &maps_y) {
+
+  // what we want to collect
+  vector<double> next_x_vals;
+  vector<double> next_y_vals;
+
+  // now add some extra points based on input target_s_points (how fast u wanna change lane)
+  for (int i=0; i < target_s_points.size(); i++) {
+    // double target_d = (2+4*(double)lane_points[i]);
+    //std::cout<<"lane point ="<<target_d<<std::endl;
+    vector<double> next_ref_point = getXY(car_s+target_s_points[i], (2+4*target_lane), maps_s, maps_x, maps_y);
+    spline_ref_x.push_back(next_ref_point[0]);
+    spline_ref_y.push_back(next_ref_point[1]);
+  }
+
+  // shift the point relative to current car pos
+  for (int i=0; i < spline_ref_x.size(); i++) {
+    double shift_x = spline_ref_x[i] - pos_x;
+    double shift_y = spline_ref_y[i] - pos_y;
+    spline_ref_x[i] = (shift_x * cos(0 - angle) - shift_y * sin(0 - angle));
+    spline_ref_y[i] = (shift_x * sin(0 - angle) + shift_y * cos(0 - angle));
+  }
+
+  // spline this mf
+  tk::spline spline_machine;
+  spline_machine.set_points(spline_ref_x, spline_ref_y);
+
+  // to smoothen out the transition, add points from the previous path first
+  for (int i=0; i < previous_path_x.size(); i++) {
+    next_x_vals.push_back(previous_path_x[i]);
+    next_y_vals.push_back(previous_path_y[i]);
+  }
+
+  // calculate how to break up spline points to travel at our desired ref velocity
+  double target_x = target_s_points[0];
+  double target_y = spline_machine(target_x);
+  double target_dist = sqrt(target_x*target_x + target_y*target_y);
+  double current_x = 0;  // imagine travelling from origin of the triangle
+  int n_added = 0;
+  
+  //while (current_x < target_x) {
+  while (n_added < 50 - previous_path_x.size()) {
+    // fix velocity
+    double delta = 0.224;
+    if (ref_velocity < 35) {
+      delta = 0.16;
+    }
+    if (speed_up && (ref_velocity < 49.3)) {
+      ref_velocity += delta;
+    } else if (slow_down && (ref_velocity > 35)) {
+      ref_velocity -= delta;
+    } else if (follow && (fabs(ref_velocity - lane_velocity) > 5)) {
+      if (ref_velocity < lane_velocity) {
+        ref_velocity += delta;
+      } else {
+        ref_velocity -= delta;
+      }
+    } else if (ref_velocity < lane_velocity) {
+      ref_velocity += delta;
+    }
+    
+    if (is_lane_change) {
+      // curving if we do lane change, so dampen the speed a little for more pieces
+      ref_velocity -= 0.05;
+    }
+
+    // then decide on how far to push x_local
+    double n_pieces = target_dist / (0.02 * ref_velocity / 2.24);
+    double x_local = current_x + (target_x / n_pieces);
+    double y_local = spline_machine(x_local);
+
+    // reset our index
+    current_x = x_local;
+
+    // rotate back to global coordinates to push to the next_vals
+    // step 1: rotate
+    double x_point = (x_local * cos(angle) - y_local * sin(angle));
+    double y_point = (x_local * sin(angle) + y_local * cos(angle));
+    // step 2: shift
+    x_point += pos_x;
+    y_point += pos_y; 
+
+    next_x_vals.push_back(x_point);
+    next_y_vals.push_back(y_point);
+    
+    n_added += 1;
+  }
+  
+  return {next_x_vals, next_y_vals};
 }
 
 #endif  // HELPERS_H
