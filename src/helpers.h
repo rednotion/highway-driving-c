@@ -173,12 +173,12 @@ double getCarSpeed(vector<double> sensor_fusion) {
   double obj_vx = sensor_fusion[3];
   double obj_vy = sensor_fusion[4];
   double obj_speed = sqrt(obj_vx*obj_vx + obj_vy*obj_vy);
-
   return obj_speed;
 }
 
 // get space
-double spaceAroundCar(vector<vector<double>> sensor_fusion, vector<int> lane_cars, int track_car_idx, char direction) {
+double spaceAroundCar(vector<vector<double>> sensor_fusion, vector<int> lane_cars, 
+                      int track_car_idx, char direction) {
   double space = 10000.0;
   double track_car_s = sensor_fusion[track_car_idx][5];
   if (direction == 'f') {
@@ -203,16 +203,19 @@ double spaceAroundCar(vector<vector<double>> sensor_fusion, vector<int> lane_car
   return space;
 }
 
-// check viable path
-bool viablePath(vector<vector<double>> next_xy_vals,
-                int block_car_idx,
-                vector<int> lane_obj_idxs,
+// check viable path by estimating the path of every other object and checking for distance
+bool viablePath(vector<vector<double>> trajectory_vals,
+                int block_car_idx, vector<int> lane_obj_idxs,
                 vector<vector<double>> sensor_fusion,
                 const vector<double> &maps_s, const vector<double> &maps_x,
                 const vector<double> &maps_y) {
 
-  vector<double> next_x = next_xy_vals[0];
-  vector<double> next_y = next_xy_vals[1];
+  vector<double> next_x = trajectory_vals[0];
+  vector<double> next_y = trajectory_vals[1];
+  
+  // proxy angle by using last minus first value
+  int end_int = next_y.size() - 1;
+  double angle = atan2(next_y[end_int] - next_y[0], next_x[end_int] - next_x[0]);
   
   vector<int> objs_to_test = lane_obj_idxs;
   objs_to_test.push_back(block_car_idx);
@@ -223,13 +226,21 @@ bool viablePath(vector<vector<double>> next_xy_vals,
     double obj_speed = getCarSpeed(sensor_fusion[objs_to_test[j]]);
     
     for (int i=0; i < next_x.size(); ++i) {
-      // check the adjacent car
       obj_s += 0.02 * obj_speed;
       vector<double> obj_xy = getXY(obj_s, obj_d, maps_s, maps_x, maps_y);
       double vertical_dist = fabs(obj_xy[0] - next_x[i]);
       double horizontal_dist = fabs(obj_xy[1] - next_y[i]);
       double pythagoras = pow(vertical_dist*vertical_dist + horizontal_dist*horizontal_dist, 0.5);
-      if (pythagoras < 10) {
+      // check if diagonal distance b/w our path & other car is less than 10m
+      if (pythagoras < 6) {
+        return false;
+      }
+      // if the other lane obj ends up being just 20m ahead of us, don't bother man
+      // j != lane_obj_idxs.size() --> not the blocking car
+      vector<double> next_sd  = getFrenet(next_x[i], next_y[i], angle, maps_x, maps_y);
+      double s_dist = obj_s - next_sd[0];
+      if ((j != lane_obj_idxs.size()) && (s_dist > 0) && (s_dist < 20)) {
+        std::cout<<"......car too close to switch"<<std::endl;
         return false;
       }
     }
@@ -239,12 +250,13 @@ bool viablePath(vector<vector<double>> next_xy_vals,
 
 // generate path
 vector<vector<double>> generateNextVals(double car_s, double pos_x, double pos_y, double angle,
-                                        double &ref_velocity, double lane_velocity,
-                                        bool is_lane_change, int target_lane, //vector<int> lane_points,
+                                        int state, 
+                                        double &ref_velocity, double target_velocity,
                                         vector<double> target_s_points, 
+                                        vector<int> target_lanes,
+                                        //int target_lane,
                                         vector<double> previous_path_x, vector<double> previous_path_y,
                                         vector<double> spline_ref_x, vector<double> spline_ref_y,
-                                        bool speed_up, bool slow_down, bool follow,
                                         const vector<double> &maps_s, const vector<double> &maps_x, 
                                         const vector<double> &maps_y) {
 
@@ -254,9 +266,7 @@ vector<vector<double>> generateNextVals(double car_s, double pos_x, double pos_y
 
   // now add some extra points based on input target_s_points (how fast u wanna change lane)
   for (int i=0; i < target_s_points.size(); i++) {
-    // double target_d = (2+4*(double)lane_points[i]);
-    //std::cout<<"lane point ="<<target_d<<std::endl;
-    vector<double> next_ref_point = getXY(car_s+target_s_points[i], (2+4*target_lane), maps_s, maps_x, maps_y);
+    vector<double> next_ref_point = getXY(car_s+target_s_points[i], (2+4*target_lanes[i]), maps_s, maps_x, maps_y);
     spline_ref_x.push_back(next_ref_point[0]);
     spline_ref_y.push_back(next_ref_point[1]);
   }
@@ -289,26 +299,37 @@ vector<vector<double>> generateNextVals(double car_s, double pos_x, double pos_y
   //while (current_x < target_x) {
   while (n_added < 50 - previous_path_x.size()) {
     // fix velocity
-    double delta = 0.224;
-    if (ref_velocity < 35) {
-      delta = 0.16;
-    }
-    if (speed_up && (ref_velocity < 49.3)) {
-      ref_velocity += delta;
-    } else if (slow_down && (ref_velocity > 35)) {
-      ref_velocity -= delta;
-    } else if (follow && (fabs(ref_velocity - lane_velocity) > 5)) {
-      if (ref_velocity < lane_velocity) {
+    double delta = (ref_velocity < 35) ? 0.16 : 0.224;
+
+    // for keep in lane, immediate switch, test switches, speed up if possible
+    if ((state == 0) | (state == 1) | (state == 2)) {
+      if (ref_velocity < 49.3) {
         ref_velocity += delta;
-      } else {
+      }
+    // for prepare to switch
+    } else if (state == 3) {
+      if (ref_velocity > 35) {
         ref_velocity -= delta;
       }
-    } else if (ref_velocity < lane_velocity) {
-      ref_velocity += delta;
+    // for follow
+    } else if (state == 99) {
+      // only if we're more than 5kmph different then we try to adjust
+      if (fabs(ref_velocity - target_velocity) > 5) {
+        if (ref_velocity < target_velocity) {
+          ref_velocity += delta;
+        } else {
+          ref_velocity -= delta;
+        }
+      }
+    } else if (state == -1) {
+      // just slow down, no limit
+      if (ref_velocity > 0.5) {
+        ref_velocity -= delta;
+      }
     }
-    
-    if (is_lane_change) {
-      // curving if we do lane change, so dampen the speed a little for more pieces
+
+    // curving if we do lane change, so dampen the speed a little for more pieces
+    if ((state == 1) | (state == 2)) {
       ref_velocity -= 0.05;
     }
 

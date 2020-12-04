@@ -139,7 +139,7 @@ int main() {
             if (obj_lane < 3) {
               lane_speeds[obj_lane] += obj_speed;
               lane_cars[obj_lane].push_back(i);
-              if (fabs(obj_s - car_s) < 20) {
+              if ((fabs(obj_s - car_s) < 20) | (obj_s > car_s)) {
                 lane_nearby_cars[obj_lane] += 1;
               }
             }
@@ -159,7 +159,7 @@ int main() {
                 
                 if (obj_end_path_s - car_s < 20) {
                   slow_down = true;
-              	} else if (obj_end_path_s - car_s < 35) {
+                } else if (obj_end_path_s - car_s < 35) {
                   consider_switch = true;
                 }
               }
@@ -169,16 +169,18 @@ int main() {
           // get speeds and value (inverse of cost)
           vector<double> lane_value = {0,0,0};
           for (int i=0; i < 3; i++) {
-            lane_speeds[i] = lane_speeds[i] / (double)lane_cars[i].size();
-            lane_value[i] = lane_speeds[i] - 0 * (double)lane_nearby_cars[i];
+            if (lane_speeds[i] > 0) {
+              lane_speeds[i] = lane_speeds[i] / (double)lane_cars[i].size();
+            } else {
+              lane_speeds[i] = 49.5;
+            }
+            lane_value[i] = lane_speeds[i] - 5 * (double)lane_nearby_cars[i];
           }
           
           // only consider switch if you're cleanly in a lane (not in the middle)
           bool in_lane_center = false;
           if ((car_d > lane * 4 + 1) && (car_d < lane * 4 + 3)) {
             in_lane_center = true;
-          } else {
-            std::cout<<"..transiting... no decision"<<std::endl;
           }
           
           // check if you're prepping for lane change by slowing down
@@ -196,9 +198,9 @@ int main() {
             // STEP 1: Which lanes to consider, based on speed
             switch_lane = 1;
             if (lane == 1) {
-              if (lane_cars[0].size() == 0) {
+              if (lane_nearby_cars[0]== 0) {
                 switch_lane = 0;
-              } else if (lane_cars[2].size() == 0) {
+              } else if (lane_nearby_cars[2] == 0) {
                 switch_lane = 2;
               } else if (lane_value[0] > lane_value[2]) {
                 switch_lane = 0;
@@ -209,7 +211,7 @@ int main() {
 
             // STEP 2: Check cars in that lane to decide what we can do
             bool immediate_switch = true;
-            double adj_car_speed;
+            double adj_car_speed = 49.5;
             double adj_car_dist = 10000.0;
             double adj_car_front_space = 0.0;
             double adj_car_back_space = 0.0;
@@ -220,16 +222,16 @@ int main() {
               double obj_s = sensor_fusion[obj_idx][5];
               double obj_end_path_s = obj_s + (double)previous_path_size * 0.02 * obj_speed;
 
-              // if obj between -15 behind us and +30 in front of us, hard to switch
-              if ((car_s - 15 < obj_end_path_s) && (obj_end_path_s < car_s + 30)) {
+              // if obj between -30 behind us and +30 in front of us, hard to switch
+              if ((car_s - 30 < obj_end_path_s) && (obj_end_path_s < car_s + 30)) {
                 immediate_switch = false;
               } 
 
               // determine if this is the nearest adj car
-              double distance_to_us = abs(obj_end_path_s - car_s);
-              if (distance_to_us < adj_car_dist) {
+              double distance_to_us = obj_end_path_s - car_s;
+              if ((distance_to_us > -10) && (fabs(distance_to_us) < adj_car_dist)) {
                 adj_car_idx = obj_idx;
-                adj_car_dist = distance_to_us;
+                adj_car_dist = fabs(distance_to_us);
                 adj_car_speed = obj_speed;
                 adj_car_front_space = spaceAroundCar(sensor_fusion, lane_cars[switch_lane], adj_car_idx, 'f');
                 adj_car_back_space = spaceAroundCar(sensor_fusion, lane_cars[switch_lane], adj_car_idx, 'b');
@@ -243,36 +245,45 @@ int main() {
               // 99 = just stay in this lane and track the car in front of you
             
             double current_dist_adj_car = fabs(original_car_s - (double)sensor_fusion[adj_car_idx][5]);
-            if (immediate_switch) {
-              std::cout<<"Make immediate switch to lane "<<switch_lane<<std::endl;
-              state = 1;
-              prep_count = 0;
-            } else if ((adj_car_front_space >= 50) && (current_dist_adj_car <= 40) && (ref_velocity > adj_car_speed + 5)) {
+            if (immediate_switch && (ref_velocity > 35)) {
+              if (state != 2) {
+                std::cout<<"Make immediate switch to lane "<<switch_lane<<std::endl;
+              }
               state = 2;
               prep_count = 0;
-            } else if ((current_dist_adj_car <= 40) && (adj_car_back_space >= 50) && (adj_car_speed > block_car_speed)) {
-              std::cout<<"Slow down to try to go behind dude in lane "<<switch_lane<<std::endl;
+            } else if ((lane_nearby_cars[switch_lane] < 2) && (current_dist_adj_car <= 10) && (ref_velocity > adj_car_speed + 5)) {
+              state = 2;
+              prep_count = 0;
+            } else if ((current_dist_adj_car <= 40) && (adj_car_back_space >= 50) && (adj_car_speed > block_car_speed + 5)) {
+              if (state != 3) {
+                std::cout<<"Slow down to try to go behind dude in lane "<<switch_lane<<std::endl;
+              }
               state = 3;
               prep_count = 1;
             } else {
-              std::cout<<"Just trail dude in front of u"<<std::endl;
+              if (state != 99) {
+                std::cout<<"Just trail dude in front of us"<<std::endl;
+              }
               state = 99;
               prep_count = 0;
             }
           } else if (slow_down) {
-            state = -1;
             // too close to switch, just slow down
-            std::cout<<"Slowing down..."<<std::endl;
+            if (state != 99) {
+              std::cout<<"Slowing down..."<<std::endl;
+            }
+            state = 99;
+            prep_count = 0;
           } else {
             state = 0; // move forward
-            std::cout<<"I am happy in my lane!"<<std::endl;
+            //std::cout<<"I am happy in my lane!"<<std::endl;
             prep_count = 0;
           }
          
 
-          // ***************************************** //
-          // ** MAKE PATH BASED ON DESIRED BEHAVIOR ** //
-          // ***************************************** //
+          // ***************** //
+          // ** SET UP PATH ** //
+          // ***************** //
           double pos_x;
           double pos_y;
           double angle;
@@ -305,130 +316,66 @@ int main() {
 
           vector<vector<double>> trajectory_vals;
           vector<double> target_s_points = {30, 60, 90};
+
+
+          // **************************************** //
+          // ** GENERATE TRAJECTORY BASED ON STATE ** //
+          // **************************************** //
           
-          if (state == 0) {
-            trajectory_vals = generateNextVals(
-              car_s, pos_x, pos_y, angle,
-              ref_velocity, max_velocity,
-              false, lane, //stay_in_lane_points,
-              target_s_points, 
-              previous_path_x, previous_path_y,
-              spline_ref_x, spline_ref_y,
-              false, // speed up
-              false, // slow down
-              false, // follow
-              map_waypoints_s, map_waypoints_x, map_waypoints_y
-            );
-          } else if (state == -1) {
-            // slow the f down
-             trajectory_vals = generateNextVals(
-              car_s, pos_x, pos_y, angle,
-              ref_velocity, max_velocity,
-              false, lane, //stay_in_lane_points, // is lane change
-              target_s_points, 
-              previous_path_x, previous_path_y,
-              spline_ref_x, spline_ref_y,
-              false, // speed up
-              true, // slow down
-              false, // follow
-              map_waypoints_s, map_waypoints_x, map_waypoints_y
-            );
-          } else if (state == 1) {
-            // immediate switch
-            lane = switch_lane; // set your target lane
-            trajectory_vals = generateNextVals(
-              car_s, pos_x, pos_y, angle,
-              ref_velocity, max_velocity,
-              true, switch_lane, //switch_lane_points, // is lane change
-              target_s_points, 
-              previous_path_x, previous_path_y,
-              spline_ref_x, spline_ref_y,
-              true, // speed up
-              false, // slow down
-              false, // follow
-              map_waypoints_s, map_waypoints_x, map_waypoints_y
-            );
-          } else if (state == 2) {
-            // try options for a lane change
+          if (state != 2) {
+            // generate solution using max velocity
+            trajectory_vals = generateNextVals(car_s, pos_x, pos_y, angle, state,
+                                               ref_velocity, block_car_speed, // only used if state =99
+                                               target_s_points, {lane, lane, lane},
+                                               previous_path_x, previous_path_y,
+                                               spline_ref_x, spline_ref_y,
+                                               map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          } else {
+            // try a couple of trajectories
+            bool is_viable;
             vector<vector<double>> option_vals;
             vector<vector<double>> target_s_options = {
               {30, 60, 90},
-              {35, 65, 95},
-              {40, 70, 100}
+              {5, 35, 65, 95},
+              {10, 40, 70, 100},
+              {15, 45, 75, 105},
             };
-            
+            vector<vector<int>> target_lane_options = {
+              {switch_lane, switch_lane, switch_lane},
+              {lane, switch_lane, switch_lane, switch_lane},
+              {lane, switch_lane, switch_lane, switch_lane},
+              {lane, switch_lane, switch_lane, switch_lane},
+            };
+
             for (int i=0; i<target_s_options.size(); ++i) {
-              option_vals = generateNextVals(
-                car_s, pos_x, pos_y, angle,
-                ref_velocity, max_velocity,
-                true, switch_lane, //target_lane_options[i], // is lane change
-                target_s_options[i],
-                previous_path_x, previous_path_y,
-                spline_ref_x, spline_ref_y,
-                true, // speed up
-                false, // slow down
-                false, // follow
-                map_waypoints_s, map_waypoints_x, map_waypoints_y
-              );
-              
-              bool is_viable = viablePath(option_vals,
-                                          block_car_idx, lane_cars[switch_lane],
-                                          sensor_fusion,
-                                          map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              option_vals = generateNextVals(car_s, pos_x, pos_y, angle, state,
+                                             ref_velocity, block_car_speed, // only used if state =99
+                                             // use ith option
+                                             target_s_options[i], target_lane_options[i],
+                                             previous_path_x, previous_path_y,
+                                             spline_ref_x, spline_ref_y,
+                                             map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              is_viable = viablePath(option_vals, block_car_idx, lane_cars[switch_lane],
+                                     sensor_fusion, map_waypoints_s, map_waypoints_x, map_waypoints_y);
               if (is_viable) {
                 std::cout<<"Switching to lane "<<switch_lane<<" with option "<<i<<std::endl;
                 trajectory_vals = option_vals;
-                lane = switch_lane;
+                lane = switch_lane; // only update lane if this works
                 break;
               }
             }
+
             if (lane != switch_lane) {
-              // if none of the paths viable, then just stick to switch_decision = 99
-              // just follow dude in front of u
               std::cout<<"None of the options worked... just track car"<<std::endl;
-              trajectory_vals = generateNextVals(
-                car_s, pos_x, pos_y, angle,
-                ref_velocity, block_car_speed,
-                false,  lane, //stay_in_lane_points, // is lane change
-                target_s_points,
-                previous_path_x, previous_path_y,
-                spline_ref_x, spline_ref_y,
-                false, // speed up
-                false, // slow down
-                true, // follow
-                map_waypoints_s, map_waypoints_x, map_waypoints_y
-              );
+              trajectory_vals = generateNextVals(car_s, pos_x, pos_y, angle, 99,
+                                               ref_velocity, block_car_speed, // only used if state =99
+                                               target_s_points, {lane, lane, lane},
+                                               previous_path_x, previous_path_y,
+                                               spline_ref_x, spline_ref_y,
+                                               map_waypoints_s, map_waypoints_x, map_waypoints_y);
             }
-          } else if (state == 3) {
-            // just slow down to wait for a chance
-            trajectory_vals = generateNextVals(
-              car_s, pos_x, pos_y, angle,
-              ref_velocity, max_velocity,
-              false, lane, //stay_in_lane_points,
-              target_s_points,
-              previous_path_x, previous_path_y,
-              spline_ref_x, spline_ref_y,
-              false, // speed up
-              true, // slow down
-              false, // follow
-              map_waypoints_s, map_waypoints_x, map_waypoints_y
-            );
-          } else {
-            // just follow dude in front of u
-            trajectory_vals = generateNextVals(
-              car_s, pos_x, pos_y, angle,
-              ref_velocity, block_car_speed, 
-              false, lane, //stay_in_lane_points,
-              target_s_points, 
-              previous_path_x, previous_path_y,
-              spline_ref_x, spline_ref_y,
-              false, // speed up
-              false, // slow down
-              true, // follow
-              map_waypoints_s, map_waypoints_x, map_waypoints_y
-            );
           }
-          
+
           // ************ //
           // * END HERE * //
           // ************ //
