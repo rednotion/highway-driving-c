@@ -121,7 +121,7 @@ int main() {
           // lane data 
           vector<double> lane_speeds = {0, 0, 0};
           vector<vector<int>> lane_cars = {{}, {}, {}};
-          vector<int> lane_nearby_cars = {0, 0, 0};
+          vector<int> lane_nearby_cars = {0, 0, 0}; // store cars that are pretty near us behind, or all cars ahead
           
           // blocking car
           int block_car_idx;
@@ -157,8 +157,10 @@ int main() {
                   block_car_idx = i;
                 }
                 
-                if (obj_end_path_s - car_s < 20) {
+                // if we are too close, just slow down before deciding anything
+                if (obj_end_path_s - car_s < 25) {
                   slow_down = true;
+                // otherwise if b/w 25-35, then consider switching lanes
                 } else if (obj_end_path_s - car_s < 35) {
                   consider_switch = true;
                 }
@@ -174,25 +176,34 @@ int main() {
             } else {
               lane_speeds[i] = 49.5;
             }
+            // dock some points depending on the crowd of the lane
             lane_value[i] = lane_speeds[i] - 5 * (double)lane_nearby_cars[i];
           }
           
           // only consider switch if you're cleanly in a lane (not in the middle)
+          // this is to help for cases where we are mid-transition but the path isn't complete yet
           bool in_lane_center = false;
           if ((car_d > lane * 4 + 1) && (car_d < lane * 4 + 3)) {
             in_lane_center = true;
           }
           
           // check if you're prepping for lane change by slowing down
+          // if prepping, don't allow us to consider which lane to change
           bool not_prepping = true;
           if ((state == 3) && (prep_count < 20)) {
             not_prepping = false;
-            state = 2; // try to plan a switch 
-            switch_lane = prep_target_lane;
-            prep_count += 1;
           }
           
-          // examine which lane to switch to
+          // ********************* //
+          // ** DECIDE ON STATE ** //
+          // ********************* //
+          // -1 = slow down and stay in this lane
+          // 0 = forward tracking
+          // 1 = immediate switch
+          // 2 = car is 10m vicinity, car has space in front, car vs guy in front of u > 20
+          // 3 = plan a switch car is pretty ahead of u, slown down to lane change
+          // 99 = just stay in this lane and track the car in front of you
+
           if (consider_switch && in_lane_center) {
             
             // STEP 1: Which lanes to consider, based on speed
@@ -237,12 +248,6 @@ int main() {
                 adj_car_back_space = spaceAroundCar(sensor_fusion, lane_cars[switch_lane], adj_car_idx, 'b');
               }
             }
-              // -1 = slow down and stay in this lane
-              // 0 = forward tracking
-              // 1 = immediate switch
-              // 2 = car is 10m vicinity, car has space in front, car vs guy in front of u > 20
-              // 3 = plan a switch car is pretty ahead of u, slown down to lane change
-              // 99 = just stay in this lane and track the car in front of you
             
             double current_dist_adj_car = fabs(original_car_s - (double)sensor_fusion[adj_car_idx][5]);
             if (immediate_switch && (ref_velocity > 35)) {
@@ -251,7 +256,11 @@ int main() {
               }
               state = 2;
               prep_count = 0;
+              // technically you can set state = 1 here and bypass the checking
+              // but if we set state 2 we can make a couple of trajectories & check if they're viable
+              // this is safer
             } else if ((lane_nearby_cars[switch_lane] < 2) && (current_dist_adj_car <= 10) && (ref_velocity > adj_car_speed + 5)) {
+              // test some trajectories
               state = 2;
               prep_count = 0;
             } else if ((current_dist_adj_car <= 40) && (adj_car_back_space >= 50) && (adj_car_speed > block_car_speed + 5)) {
@@ -259,24 +268,29 @@ int main() {
                 std::cout<<"Slow down to try to go behind dude in lane "<<switch_lane<<std::endl;
               }
               state = 3;
+              prep_target_lane = switch_lane; // store the prep target lane variable
               prep_count = 1;
             } else {
               if (state != 99) {
-                std::cout<<"Just trail dude in front of us"<<std::endl;
+                std::cout<<"Trail the car in front of us"<<std::endl;
               }
               state = 99;
               prep_count = 0;
             }
           } else if (slow_down) {
-            // too close to switch, just slow down
             if (state != 99) {
-              std::cout<<"Slowing down..."<<std::endl;
+              std::cout<<"Too close to car ahead... slowing down..."<<std::endl;
             }
             state = 99;
             prep_count = 0;
+          } else if (not_prepping == false) {
+            // if you've been prepping, try to switch to the lane you were prepping for
+            state = 2; 
+            switch_lane = prep_target_lane; // use the stored value of this
+            prep_count += 1;
           } else {
-            state = 0; // move forward
             //std::cout<<"I am happy in my lane!"<<std::endl;
+            state = 0; // move forward
             prep_count = 0;
           }
          
@@ -323,7 +337,6 @@ int main() {
           // **************************************** //
           
           if (state != 2) {
-            // generate solution using max velocity
             trajectory_vals = generateNextVals(car_s, pos_x, pos_y, angle, state,
                                                ref_velocity, block_car_speed, // only used if state =99
                                                target_s_points, {lane, lane, lane},
@@ -349,9 +362,8 @@ int main() {
 
             for (int i=0; i<target_s_options.size(); ++i) {
               option_vals = generateNextVals(car_s, pos_x, pos_y, angle, state,
-                                             ref_velocity, block_car_speed, // only used if state =99
-                                             // use ith option
-                                             target_s_options[i], target_lane_options[i],
+                                             ref_velocity, block_car_speed,
+                                             target_s_options[i], target_lane_options[i], // use ith option
                                              previous_path_x, previous_path_y,
                                              spline_ref_x, spline_ref_y,
                                              map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -373,6 +385,11 @@ int main() {
                                                previous_path_x, previous_path_y,
                                                spline_ref_x, spline_ref_y,
                                                map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              if (not_prepping == false) {
+                // if we we routed here b/c we were prepping & wanted to check if we can switch now,
+                // reset the state back to prepping i.e. 3
+                state = 3;
+              }
             }
           }
 
