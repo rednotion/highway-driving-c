@@ -176,7 +176,10 @@ double getCarSpeed(vector<double> sensor_fusion) {
   return obj_speed;
 }
 
-// get space
+// get space around car by comparing all the objects in its lane
+// direction = 'f' means forward space (compare to cars in front)
+// direction = 'b' means backward space
+// track_car_idx is the car you want as the reference point
 double spaceAroundCar(vector<vector<double>> sensor_fusion, vector<int> lane_cars, 
                       int track_car_idx, char direction) {
   double space = 10000.0;
